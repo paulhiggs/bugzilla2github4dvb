@@ -190,11 +190,21 @@ def github_issues_add(issues):
         if github_issue:
             bug_id = bug_id_parse(github_issue["body"])
             if bug_id > 0:
-                print("\tissue #%d is the Bug %d, updating..." % (id, bug_id))
                 issue = issues.pop(bug_id, None)
+                if issue and github_issue_unchanged(github_issue, issue):
+                    # Do not use up GitHub's rate limit on a resumed run
+                    print("\tissue #%d is the Bug %d, up to date, skipping..."
+                          % (id, bug_id))
+                    continue
+                print("\tissue #%d is the Bug %d, updating..." % (id, bug_id))
                 github_issue_update(id, issue)
             elif bug_id == 0:
-                print("\tissue #%d is a deleted Bugzilla Bug, updating...")
+                if (github_issue["state"] == "closed"
+                        and github_issue["title"] == DELETED_BUG_SIGNATURE):
+                    print("\tissue #%d is a deleted Bugzilla Bug, up to date, "
+                          "skipping..." % id)
+                    continue
+                print("\tissue #%d is a deleted Bugzilla Bug, updating..." % id)
                 issue = new_issue(id, True)
                 github_issue_update(id, issue)
             else:
@@ -220,6 +230,27 @@ def github_issues_add(issues):
                     issue = issues.pop(first_id)
             # Note: appending an issue does not guarantee it will become #id
             github_issue_add(id, issue)
+
+
+def github_issue_unchanged(github_issue, issue):
+    """
+    Checks whether an issue on GitHub already matches the converted Bugzilla
+    Bug, so it does not need to be updated.
+
+    Args:
+        github_issue: A json-encoded issue from GitHub.
+        issue: Converted Bugzilla Bug.
+    """
+    milestone = github_issue.get("milestone") or {}
+    return (github_issue["title"] == issue["title"]
+            and (github_issue["body"] or "").replace("\r\n", "\n")
+            == issue["body"]
+            and github_issue["state"] == issue["state"]
+            and sorted(l["name"].lower() for l in github_issue["labels"])
+            == sorted(l.lower() for l in issue["labels"])
+            and sorted(a["login"] for a in github_issue["assignees"])
+            == sorted(issue["assignees"])
+            and milestone.get("number") == issue["milestone"])
 
 
 def github_issue_get(id):
