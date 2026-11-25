@@ -823,6 +823,18 @@ def bug2issue(bug):
     # Convert attachments if any
     if "attachment" in bug:
         attachments = attachments2dict(bug.pop("attachment"))
+    # Some exports have an empty creation_ts: fall back to the bug_when
+    # of the first comment (the bug description)
+    if not bug.get("creation_ts"):
+        comments = bug.get("long_desc")
+        first = comments[0] if isinstance(comments, list) else comments
+        if not first or not first.get("bug_when"):
+            print("Error: bug %d has no creation_ts and no comments"
+                  % issue["id"])
+            exit(1)
+        bug["creation_ts"] = first["bug_when"]
+        print("WARNING: bug %d has no creation_ts, using comment %s date %s"
+              % (issue["id"], first.get("commentid"), bug["creation_ts"]))
     # Convert long_desc and attachment to comments
     issue["comments"].extend(comments2list(bug.pop("long_desc"), attachments,
                                            used_attachments))
