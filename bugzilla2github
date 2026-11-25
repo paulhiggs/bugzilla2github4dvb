@@ -260,8 +260,8 @@ def github_issue_update(id, issue):
     # TODO: There is no update functionality in beta API,
     # so we use stable API to update the issue
     r = github_post("issues/%d" % id, issue,
-                    ["title", "body", "state", "labels", "assignees"],
-                    "PATCH")
+                    ["title", "body", "state", "labels", "assignees",
+                     "milestone"], "PATCH")
     if not r:
         print("Error updating issue #%d on GitHub:\n%s" % (id, r.text))
         exit(1)
@@ -274,7 +274,7 @@ def github_issue_update(id, issue):
 def github_issue_add_stable(id, issue):
     # Note: this still does not guarantee the new issue will be added as #id
     r = github_post("issues", issue,
-                    ["title", "body", "labels", "assignees"])
+                    ["title", "body", "labels", "assignees", "milestone"])
     if not r:
         print("Error adding a new issue on GitHub:\n%s" % r.text)
         exit(1)
@@ -307,6 +307,9 @@ def github_issue_add_beta(id, issue):
     if len(assignees) > 0:
         issue["assignee"] = assignees[0]
     old_id = issue.pop("id", 0)
+    milestone = issue.pop("milestone", None)
+    if milestone is not None:
+        issue["milestone"] = milestone
     issue_comments = {"issue": issue, "comments": comments}
 
     r = github_post("import/issues", issue_comments, ["issue", "comments"])
@@ -316,6 +319,7 @@ def github_issue_add_beta(id, issue):
 
     # Convert issue back to stable API
     issue["id"] = old_id
+    issue["milestone"] = milestone
     issue["assignees"] = assignees
 
     if FORCE_UPDATES:
@@ -623,6 +627,69 @@ def github_labels_create(issues):
             print("WARNING: label '%s' does not exist on GitHub" % label)
             github_label_create(label)
 
+
+def github_milestones_get():
+    """
+    Gets all the milestones of the GitHub repository.
+
+    Returns:
+        A dictionary of milestone title to milestone number.
+    """
+    milestones = {}
+    page = 1
+    while True:
+        r = github_get("milestones",
+                       {"state": "all", "per_page": 100, "page": page})
+        if not r:
+            print("Error getting milestones from GitHub:\n%s" % r.text)
+            exit(1)
+        for milestone in r.json():
+            milestones[milestone["title"]] = milestone["number"]
+        if 'rel="next"' not in r.headers.get("Link", ""):
+            return milestones
+        page += 1
+
+
+def github_milestones_create(issues):
+    """
+    Checks if all the milestones assigned to all the issues are on GitHub.
+    If FORCE_UPDATES flag is set, creates the missing milestones: closed if
+    all their issues are closed, open otherwise. Then replaces the milestone
+    titles in the issues with the GitHub milestone numbers.
+
+    Args:
+        issues: A dictionary of converted Bugzilla reports.
+    """
+    states = {}
+    for id in issues:
+        title = issues[id]["milestone"]
+        if title is not None:
+            states.setdefault(title, set()).add(issues[id]["state"])
+
+    milestones = github_milestones_get()
+    for title in sorted(states):
+        if title in milestones:
+            print("\tmilestone '%s' exists on GitHub" % title)
+            continue
+        state = "closed" if states[title] == {"closed"} else "open"
+        print("WARNING: milestone '%s' does not exist on GitHub" % title)
+        print("\tcreating %s milestone '%s' on GitHub..." % (state, title))
+        r = github_post("milestones", {
+            "title": title,
+            "state": state,
+            "description": "Bugzilla target milestone",
+        }, ["title", "state", "description"])
+        if not r:
+            print("Error creating milestone %s: %s" % (title, r.text))
+            exit(1)
+        if FORCE_UPDATES:
+            milestones[title] = r.json()["number"]
+
+    for id in issues:
+        title = issues[id]["milestone"]
+        if title is not None:
+            # Without -f the milestones are not created, so there is no number
+            issues[id]["milestone"] = milestones.get(title)
 
 
 def github_assignees_check(issues):
@@ -1028,12 +1095,18 @@ def bug2issue(bug):
     body.append("Last updated: " + issue["updated_at"])
     body.append("")
 
+    # Convert target_milestone to milestone. The title is replaced with
+    # the GitHub milestone number by github_milestones_create().
+    target_milestone = bug.pop("target_milestone", "")
+    if target_milestone not in BUGZILLA_EMPTY_VALUES:
+        issue["milestone"] = target_milestone
+
     # All the other Bugzilla fields, so no information is lost
     fields = [
         ("Product", product),
         ("Component", component),
         ("Version", bug.pop("version", "")),
-        ("Target milestone", bug.pop("target_milestone", "")),
+        ("Target milestone", target_milestone),
         ("Classification", bug.pop("classification", "")),
         ("Status", " ".join(v for v in (status, resolution) if v)),
         ("Severity", severity),
@@ -1142,6 +1215,7 @@ def new_issue(id, dummy):
     issue["labels"] = []
     issue["assignees"] = []
     issue["comments"] = []
+    issue["milestone"] = None
     issue["id"] = int(id)
     issue["title"] = DELETED_BUG_SIGNATURE
     issue["created_at"] = current_githubdate()
@@ -1308,6 +1382,8 @@ def main(argv):
 
     print("===> Checking if all the labels exist on GitHub...")
     github_labels_create(issues)
+    print("===> Checking if all the milestones exist on GitHub...")
+    github_milestones_create(issues)
     print("===> Checking if all the assignees exist on GitHub...")
     github_assignees_check(issues)
 
