@@ -432,12 +432,17 @@ def github_request(method, url, data=None, params=None):
         if data:
             print("DEBUG DATA: " + data)
 
-    for attempt in range(1, GITHUB_RETRIES + 1):
+    # Rate limits only mean "slow down", so waiting for them does not count
+    # as a failed attempt: the script waits as long as GitHub needs
+    attempt = 0
+    limited = 0
+    while attempt < GITHUB_RETRIES:
         try:
             r = requests.request(method, u, params=params,
                                  headers=github_headers(), data=data,
                                  timeout=GITHUB_TIMEOUT)
         except requests.exceptions.RequestException as e:
+            attempt += 1
             wait = min(2 ** attempt, 300)
             print("WARNING: %s %s failed (%s), retrying in %ds..."
                   % (method, u, e, wait))
@@ -445,11 +450,13 @@ def github_request(method, url, data=None, params=None):
             continue
 
         if r.status_code in (403, 429) and github_rate_limited(r):
-            wait = github_rate_limit_wait(r, attempt)
+            limited += 1
+            wait = github_rate_limit_wait(r, limited)
             print("WARNING: GitHub rate limit reached, waiting %ds..." % wait)
             time.sleep(wait)
             continue
         if r.status_code >= 500:
+            attempt += 1
             wait = min(2 ** attempt, 300)
             print("WARNING: %s %s returned %d, retrying in %ds..."
                   % (method, u, r.status_code, wait))
@@ -481,8 +488,9 @@ def github_rate_limit_wait(r, attempt):
     if r.headers.get("X-RateLimit-Remaining") == "0":
         reset = int(r.headers.get("X-RateLimit-Reset", "0"))
         return max(reset - int(time.time()), 0) + 5
-    # Secondary rate limit with no hint: wait at least a minute
-    return 60 * attempt
+    # Secondary rate limit with no hint: wait at least a minute, then longer
+    # each time, up to 15 minutes
+    return min(60 * attempt, 900)
 
 
 def github_get(url, params=None):
