@@ -91,12 +91,23 @@ STATUS2STATE = {
     "NEW": "open",
     "UNCONFIRMED": "open",
     "CONFIRMED": "open",
-    "VERIFIED": "open",
+    "VERIFIED": "closed",
     "ASSIGNED": "open",
     "IN_PROGRESS": "open",
     "RESOLVED": "closed",
     "CLOSED": "closed",
     "REOPENED": "open",
+}
+# Why a closed issue was closed (GitHub state_reason); default "completed"
+RESOLUTION2STATE_REASON = {
+    "FIXED": "completed",
+    "MOVED": "completed",
+    "DUPLICATE": "duplicate",
+    "INVALID": "not_planned",
+    "WONTFIX": "not_planned",
+    "WORKSFORME": "not_planned",
+    "LATER": "not_planned",
+    "REMIND": "not_planned",
 }
 STATE2CLOSED_BETA = {
     "__name__": "stable API state to beta API closed",
@@ -259,9 +270,15 @@ def github_issue_update(id, issue):
 
     # TODO: There is no update functionality in beta API,
     # so we use stable API to update the issue
-    r = github_post("issues/%d" % id, issue,
-                    ["title", "body", "state", "labels", "assignees",
-                     "milestone"], "PATCH")
+    fields = ["title", "body", "state", "labels", "assignees", "milestone"]
+    if issue.get("state_reason"):
+        fields.append("state_reason")
+    r = github_post("issues/%d" % id, issue, fields, "PATCH")
+    if (not r and r.status_code == 422 and "state_reason" in r.text
+            and issue.get("state_reason") == "duplicate"):
+        # Older GitHub versions do not know the "duplicate" reason
+        issue["state_reason"] = "not_planned"
+        r = github_post("issues/%d" % id, issue, fields, "PATCH")
     if not r:
         print("Error updating issue #%d on GitHub:\n%s" % (id, r.text))
         exit(1)
@@ -307,6 +324,8 @@ def github_issue_add_beta(id, issue):
     if len(assignees) > 0:
         issue["assignee"] = assignees[0]
     old_id = issue.pop("id", 0)
+    # The import API does not know state_reason
+    state_reason = issue.pop("state_reason", None)
     milestone = issue.pop("milestone", None)
     if milestone is not None:
         issue["milestone"] = milestone
@@ -320,6 +339,8 @@ def github_issue_add_beta(id, issue):
     # Convert issue back to stable API
     issue["id"] = old_id
     issue["milestone"] = milestone
+    if state_reason:
+        issue["state_reason"] = state_reason
     issue["assignees"] = assignees
 
     if FORCE_UPDATES:
@@ -1045,6 +1066,14 @@ def bug2issue(bug):
     # Convert bug_status to state
     status = bug.pop("bug_status")
     issue["state"] = str2list(STATUS2STATE, status)
+    # A bug with a resolution is closed, whatever its status
+    if bug.get("resolution"):
+        issue["state"] = "closed"
+    if issue["state"] == "closed":
+        issue["state_reason"] = RESOLUTION2STATE_REASON.get(
+            bug.get("resolution", ""), "completed")
+    else:
+        issue["state_reason"] = None
     if USE_BETA_API:
         # Convert creation_ts to created_at
         issue["created_at"] = bugzilladate2githubdate(bug.pop("creation_ts"))
@@ -1229,6 +1258,7 @@ def new_issue(id, dummy):
     issue["created_at"] = current_githubdate()
     issue["updated_at"] = issue["created_at"]
     issue["state"] = "closed"
+    issue["state_reason"] = "not_planned"
     if USE_BETA_API:
         issue["closed"] = True
     else:
