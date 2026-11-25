@@ -800,6 +800,52 @@ def value2labels(map, value):
     return [label_name(value)]
 
 
+def text2markdown(text):
+    """
+    Escapes Bugzilla plain text so GitHub shows it as written instead of
+    interpreting it as Markdown or HTML:
+      - "<tags>" are shown instead of being hidden as HTML
+      - "*", "`" and "~" do not start emphasis, code or strikethrough
+      - lines starting with "#", "=" or "-" do not become headings or rules
+      - indentation is kept and does not turn text into code blocks
+      - "@word" (i.e. XML attributes) does not mention GitHub users
+    Bare URLs still become links.
+    """
+    if not text:
+        return ""
+    # Keep URLs as they are (escaping would break the links): replace them
+    # with placeholders and put them back at the end
+    urls = []
+
+    def url_placeholder(match):
+        urls.append(match.group(0))
+        return "\0%d\0" % (len(urls) - 1)
+    text = re.sub(r"(?i)\b(?:https?|ftp)://[^\s<>\"]+", url_placeholder, text)
+    text = text.replace("\\", "\\\\")
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    for char in "*_`~":
+        text = text.replace(char, "\\" + char)
+    lines = []
+    for line in text.split("\n"):
+        line = line.rstrip("\r")
+        # Keep the indentation without starting a code block
+        stripped = line.lstrip(" \t")
+        indent = line[:len(line) - len(stripped)].replace("\t", "    ")
+        # Headings, setext underlines and horizontal rules
+        if stripped[:1] in ("#", "=", "-", "_", "+"):
+            stripped = "\\" + stripped
+        # Ordered lists would be renumbered by GitHub
+        stripped = re.sub(r"^(\d+)([.)])(\s|$)", r"\1\\\2\3", stripped)
+        lines.append("&nbsp;" * len(indent) + stripped)
+    text = "\n".join(lines)
+    # @word in a code span is shown as is and mentions nobody
+    text = re.sub(r"(?<![\w.@/\\])@([A-Za-z0-9][\w-]*)", r"`@\1`", text)
+    # <URL> ends the link at ">" (a bare URL link would run on to the next
+    # space, i.e. into the rest of an XML element)
+    return re.sub(r"\0(\d+)\0",
+                  lambda match: "<%s>" % urls[int(match.group(1))], text)
+
+
 def keywords2list(keywords):
     """Splits a Bugzilla comma-separated keywords string into a list."""
     return [k.strip() for k in (keywords or "").split(",") if k.strip()]
@@ -871,7 +917,7 @@ def attachment2str(idx, attach):
                  % (attach.pop("filename"),
                     attach.pop("type"),
                     attach.pop("size")))
-    issue.append("> Description:   " + attach.pop("desc"))
+    issue.append("> Description:   " + text2markdown(attach.pop("desc")))
     issue.append("> Attached by:   %s on %s"
                  % (email2login(attach.pop("attacher", ""),
                                 attach.pop("attacher.name", None)),
@@ -939,7 +985,7 @@ def comment2dict(comment, attachments, used_attachments):
         "From: " + email2login(comment.pop("who"),
                                comment.pop("who.name", None)),
         "",
-        comment.pop("thetext", ""),
+        text2markdown(comment.pop("thetext", "")),
         "",
     ])
     # Convert attachments if any
@@ -1144,7 +1190,7 @@ def bug2issue(bug):
     for name, value in fields:
         if value not in BUGZILLA_EMPTY_VALUES:
             # Escape characters that would break the markdown table
-            value = value.replace("|", r"\|").replace("\n", " ")
+            value = text2markdown(value.replace("\n", " ")).replace("|", r"\|")
             body.append("| %s | %s |" % (name, value))
     body.append("")
 
