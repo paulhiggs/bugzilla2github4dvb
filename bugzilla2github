@@ -91,7 +91,7 @@ STATUS2STATE = {
     "NEW": "open",
     "UNCONFIRMED": "open",
     "CONFIRMED": "open",
-    "VERIFIED": "closed",
+    "VERIFIED": "open",
     "ASSIGNED": "open",
     "IN_PROGRESS": "open",
     "RESOLVED": "closed",
