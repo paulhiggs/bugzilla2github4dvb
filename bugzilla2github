@@ -39,6 +39,7 @@ import requests
 import sys
 import time
 import xml.etree.ElementTree
+from urllib.parse import quote
 
 ########################################################################
 ## Global variables
@@ -70,6 +71,8 @@ GITHUB_OWNER = ""
 GITHUB_REPO = ""
 # GitHub access token
 GITHUB_TOKEN = ""
+# Maximum length of a GitHub label name
+GITHUB_LABEL_MAX = 50
 
 # Global convertion dictionaries
 EMAIL2LOGIN = {
@@ -93,6 +96,14 @@ STATE2CLOSED_BETA = {
     "__name__": "stable API state to beta API closed",
     "open": False,
     "closed": True,
+}
+# Product, component, priority, keyword and resolution values missing from
+# these maps become labels of their own (see value2labels()).
+PRODUCT2LABELS = {
+    "__name__": "product to GitHub labels",
+}
+KEYWORD2LABELS = {
+    "__name__": "keyword to GitHub labels",
 }
 COMPONENT2LABELS = {
     "__name__": "component to GitHub labels",
@@ -124,36 +135,30 @@ RESOLUTION2LABELS = {
     "FIXED": [],
     "INVALID": ["invalid"],
     "DUPLICATE": ["duplicate"],
+    "WONTFIX": ["wontfix"],
+    "WORKSFORME": ["works for me"],
+    "LATER": ["later"],
+    "REMIND": ["remind"],
+    "MOVED": ["moved"],
 }
+# Bugzilla placeholder values, not worth showing in the issue description
+BUGZILLA_EMPTY_VALUES = ["", "---", "unspecified", "Not used",
+                         "Unclassified", "0.00"]
+# Bugzilla internal fields with no meaning outside Bugzilla
 BUG_UNUSED_FIELDS = [
-    "actual_time",
-    "attachment.isobsolete",
-    "attachment.ispatch",
-    "attachment.isprivate",
     "cclist_accessible",
-    "classification",
     "classification_id",
     "comment_sort_order",
-    "estimated_time",
     "everconfirmed",
-    "long_desc.isprivate",
-    "op_sys",
-    "product",
-    "remaining_time",
     "reporter_accessible",
-    "rep_platform",
-    "target_milestone",
     "token",
-    "version",
 ]
 COMMENT_UNUSED_FIELDS = [
     "comment_count",
+    "isprivate",
 ]
 ATTACHMENT_UNUSED_FIELDS = [
-    "attacher",
-    "attacher.name",
-    "date",
-    "delta_ts",
+    "isprivate",
     "token",
 ]
 
@@ -542,13 +547,15 @@ def github_labels_create(issues):
     Args:
         issues: A dictionary of converted Bugzilla reports.
     """
-    labels_set = set()
+    # GitHub label names are case-insensitive, so use the first spelling
+    # seen for all the issues (i.e. keyword "javadoc", component "Javadoc")
+    canonical = {}
     for id in issues:
-        for label in issues[id]["labels"]:
-            labels_set.add(label)
+        issues[id]["labels"] = [canonical.setdefault(label.lower(), label)
+                                for label in issues[id]["labels"]]
 
-    for label in labels_set:
-        if github_get("labels/" + label):
+    for label in sorted(canonical.values()):
+        if github_get("labels/" + quote(label, safe="")):
             print("\tlabel '%s' exists on GitHub" % label)
         else:
             print("WARNING: label '%s' does not exist on GitHub" % label)
@@ -616,11 +623,17 @@ def XML2bug(parent):
                     if DEBUG:
                         print("\tissue['%s'] = [issue['%s'], '%s']" %
                               (key.tag, key.tag, val))
-        # Parse attributes
-        for name, val in key.items():
-            issue["%s.%s" % (key.tag, name)] = val
+        # Parse attributes. Attributes of an element with children (i.e.
+        # attachment or long_desc) go into that element's own dictionary,
+        # so repeated elements do not overwrite each other's attributes.
+        if len(key) > 0:
+            target, prefix = val, ""
+        else:
+            target, prefix = issue, key.tag + "."
+        for name, attr in key.items():
+            target[prefix + name] = attr
             if DEBUG:
-                print("\tissue['%s.%s'] = '%s'" % (key.tag, name, val))
+                print("\t['%s%s'] = '%s'" % (prefix, name, attr))
 
     return issue
 
@@ -633,6 +646,30 @@ def str2list(map, str):
         map[str] = []
 
     return map[str]
+
+
+def label_name(name):
+    """Makes a valid GitHub label name (at most 50 characters)."""
+    name = name.strip()
+    if len(name) > GITHUB_LABEL_MAX:
+        name = name[:GITHUB_LABEL_MAX - 3].rstrip() + "..."
+    return name
+
+
+def value2labels(map, value):
+    """
+    Lookups in the map specific value and returns it as a list of labels.
+    Values not in the map become a label of their own, so that no
+    information is lost.
+    """
+    if value in map:
+        return map[value]
+    return [label_name(value)]
+
+
+def keywords2list(keywords):
+    """Splits a Bugzilla comma-separated keywords string into a list."""
+    return [k.strip() for k in (keywords or "").split(",") if k.strip()]
 
 
 def ids2ids(ids):
@@ -697,6 +734,21 @@ def attachment2str(idx, attach):
                     attach.pop("type"),
                     attach.pop("size")))
     issue.append("> Description:   " + attach.pop("desc"))
+    issue.append("> Attached by:   %s on %s"
+                 % (email2login(attach.pop("attacher", ""),
+                                attach.pop("attacher.name", None)),
+                    attach.pop("date", "")))
+    modified = attach.pop("delta_ts", "")
+    if modified:
+        issue.append("> Last modified: " + modified)
+    flags = []
+    if attach.pop("ispatch", "0") == "1":
+        flags.append("patch")
+    if attach.pop("isobsolete", "0") == "1":
+        flags.append("obsolete")
+    if flags:
+        issue.append("> Flags:         " + ", ".join(flags))
+    issue.append("> (the attachment contents were not exported from Bugzilla)")
 
     # Ignore some fields
     fields_ignore(attach, ATTACHMENT_UNUSED_FIELDS)
@@ -847,10 +899,14 @@ def bug2issue(bug):
     # Convert assigned_to to assignees
     issue["assignees"].append(
         email2login(bug.pop("assigned_to"), bug.pop("assigned_to.name", None)))
-    # Convert component to labels
-    issue["labels"].extend(str2list(COMPONENT2LABELS, bug.pop("component")))
+    # Convert product and component to labels
+    product = bug.pop("product")
+    component = bug.pop("component")
+    issue["labels"].extend(value2labels(PRODUCT2LABELS, product))
+    issue["labels"].extend(value2labels(COMPONENT2LABELS, component))
     # Convert bug_status to state
-    issue["state"] = str2list(STATUS2STATE, bug.pop("bug_status"))
+    status = bug.pop("bug_status")
+    issue["state"] = str2list(STATUS2STATE, status)
     if USE_BETA_API:
         # Convert creation_ts to created_at
         issue["created_at"] = bugzilladate2githubdate(bug.pop("creation_ts"))
@@ -868,13 +924,19 @@ def bug2issue(bug):
         issue["user.login"] = user_login
 
     # Convert priority to labels
-    issue["labels"].extend(str2list(PRIORITY2LABELS, bug.pop("priority")))
+    priority = bug.pop("priority")
+    issue["labels"].extend(value2labels(PRIORITY2LABELS, priority))
     # Convert severity to labels
-    issue["labels"].extend(str2list(SEVERITY2LABELS, bug.pop("bug_severity")))
+    severity = bug.pop("bug_severity")
+    issue["labels"].extend(str2list(SEVERITY2LABELS, severity))
     # Convert resolution to labels
-    if "resolution" in bug:
-        issue["labels"].extend(
-            str2list(RESOLUTION2LABELS, bug.pop("resolution")))
+    resolution = bug.pop("resolution", "")
+    if resolution:
+        issue["labels"].extend(value2labels(RESOLUTION2LABELS, resolution))
+    # Convert keywords to labels
+    keywords = keywords2list(bug.pop("keywords", ""))
+    for keyword in keywords:
+        issue["labels"].extend(value2labels(KEYWORD2LABELS, keyword))
 
     # Create the bug description
     body = []
@@ -903,6 +965,45 @@ def bug2issue(bug):
     body.append("Last updated: " + issue["updated_at"])
     body.append("")
 
+    # All the other Bugzilla fields, so no information is lost
+    fields = [
+        ("Product", product),
+        ("Component", component),
+        ("Version", bug.pop("version", "")),
+        ("Target milestone", bug.pop("target_milestone", "")),
+        ("Classification", bug.pop("classification", "")),
+        ("Status", " ".join(v for v in (status, resolution) if v)),
+        ("Severity", severity),
+        ("Priority", priority),
+        ("Keywords", ", ".join(keywords)),
+        ("URL", bug.pop("bug_file_loc", "")),
+        ("Whiteboard", bug.pop("status_whiteboard", "")),
+        ("Deadline", bug.pop("deadline", "")),
+        ("Hardware", bug.pop("rep_platform", "")),
+        ("OS", bug.pop("op_sys", "")),
+        ("Estimated time", bug.pop("estimated_time", "")),
+        ("Remaining time", bug.pop("remaining_time", "")),
+        ("Actual time", bug.pop("actual_time", "")),
+    ]
+    groups = bug.pop("group", [])
+    bug.pop("group.id", None)
+    if not isinstance(groups, list):
+        groups = [groups]
+    fields.append(("Restricted to groups", ", ".join(groups)))
+    if "flag.name" in bug:
+        fields.append(("Flag", "%s%s (set by %s)" % (
+            bug.pop("flag.name"), bug.pop("flag.status", ""),
+            email2login(bug.pop("flag.setter", ""), None))))
+        fields_ignore(bug, ["flag.id", "flag.type_id"])
+    body.append("| Bugzilla field | Value |")
+    body.append("| --- | --- |")
+    for name, value in fields:
+        if value not in BUGZILLA_EMPTY_VALUES:
+            # Escape characters that would break the markdown table
+            value = value.replace("|", r"\|").replace("\n", " ")
+            body.append("| %s | %s |" % (name, value))
+    body.append("")
+
     # Put everything together
     if USE_BETA_API:
         issue["body"] += "\n".join(body)
@@ -910,9 +1011,11 @@ def bug2issue(bug):
         issue["body"] += "\n".join(body) + "\n\n" + \
             "\n".join(issue["comments"])
     issue["assignees"] = [a[1:] for a in issue["assignees"] if a[0] == "@"]
-    # Get unique labels
-    labels_set = set(issue["labels"])
-    issue["labels"] = list(labels_set)
+    # Get unique labels (GitHub label names are case-insensitive)
+    labels = {}
+    for label in issue["labels"]:
+        labels.setdefault(label.lower(), label)
+    issue["labels"] = list(labels.values())
 
     # Ignore some bug fields
     fields_ignore(bug, BUG_UNUSED_FIELDS)
