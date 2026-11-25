@@ -34,17 +34,11 @@ from __future__ import print_function
 import json
 import getopt
 import os
-import pprint
 import re
 import requests
 import sys
 import time
 import xml.etree.ElementTree
-from six.moves import range
-
-if sys.version[0] == '2':
-    reload(sys)
-    sys.setdefaultencoding('utf-8')
 
 ########################################################################
 ## Global variables
@@ -326,7 +320,7 @@ def github_issue_add_beta(id, issue):
         # .../ISSUE_NUMBER so it's easy to get the issue number,
         # to check that it is what was expected.
         result = re.match("https://api.github.com/repos/" + GITHUB_OWNER +
-                          "/" + GITHUB_REPO + "/issues/(\d+)",
+                          "/" + GITHUB_REPO + r"/issues/(\d+)",
                           r.json()["issue_url"])
         if not result:
             print("Error while parsing issue number:\n%s" %
@@ -727,13 +721,13 @@ def attachments2dict(attachments):
 
 
 def bugzilladate2githubdate(date):
-	    result = re.match(
-	        r'(\d\d\d\d-\d\d-\d\d) (\d\d:\d\d:\d\d) \+(\d\d)(\d\d)', date)
-	    if not result:
-	        print("Date %s was not converted!" % date)
-	        exit(1)
-	    return "{a}T{b}+{c}:{d}".format(a=result.group(1), b=result.group(2),
-	                                    c=result.group(3), d=result.group(4))
+    result = re.match(
+        r'(\d\d\d\d-\d\d-\d\d) (\d\d:\d\d:\d\d) \+(\d\d)(\d\d)', date)
+    if not result:
+        print("Date %s was not converted!" % date)
+        exit(1)
+    return "{a}T{b}+{c}:{d}".format(a=result.group(1), b=result.group(2),
+                                    c=result.group(3), d=result.group(4))
 
 
 def current_githubdate():
@@ -1042,11 +1036,11 @@ def usage():
     Displays usage information and exits.
     """
     print("Bugzilla XML export file to GitHub Issues Converter")
-    print("Usage: %s [-b] [-h] [-f] [-d]" % NAME)
+    print("Usage: %s [-e] [-h] [-f] [-d]" % NAME)
     print("\t[-x <src XML file>]")
     print("\t-o <GitHub owner> -r <GitHub repo> -t <GitHub access token>")
     print("Where:")
-    print("\t-b  use GitHub beta import API")
+    print("\t-e  use GitHub beta import API")
     print("\t-h  usage information")
     print("\t-f  force updates (actually post the changes to GitHub)")
     print("\t-d  print debug information")
@@ -1064,7 +1058,7 @@ def args_parse(argv):
     global XML_FILE, GITHUB_OWNER, GITHUB_REPO, GITHUB_TOKEN
 
     try:
-        opts, args = getopt.getopt(argv, "ehfdo:r:t:x:")
+        opts, _ = getopt.getopt(argv, "ehfdo:r:t:x:")
     except getopt.GetoptError:
         usage()
     for opt, arg in opts:
