@@ -779,8 +779,11 @@ def str2list(map, str):
 
 
 def label_name(name):
-    """Makes a valid GitHub label name (at most 50 characters)."""
-    name = name.strip()
+    """
+    Makes a valid GitHub label name: no commas (GitHub rejects them) and
+    at most 50 characters.
+    """
+    name = name.replace(",", ";").strip()
     if len(name) > GITHUB_LABEL_MAX:
         name = name[:GITHUB_LABEL_MAX - 3].rstrip() + "..."
     return name
