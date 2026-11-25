@@ -818,15 +818,20 @@ def ids2ids(ids):
 
 
 def email2login(email, name):
-    """Converts email to a GitHub user login string."""
+    """
+    Converts email to a GitHub user login string. Emails mapped in
+    EMAIL2LOGIN become @mentions. Other emails are shown by the part before
+    the "@" only (with the real name, if Bugzilla has one), so the full
+    addresses are not published. No "@" is added to them, because that
+    would mention whichever unrelated GitHub user has that login.
+    """
     issue = str2list(EMAIL2LOGIN, email)
     if issue:
         return "@" + issue
-    else:
-        if name and not name.find("@") >= 0:
-            return "%s &lt;<%s>&gt;" % (name, email)
-        else:
-            return email
+    user = email.split("@")[0]
+    if name and "@" not in name and name != user:
+        return "%s (%s)" % (name, user)
+    return user
 
 
 def emails2logins(emails):
