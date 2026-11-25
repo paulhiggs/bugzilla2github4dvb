@@ -45,7 +45,7 @@ import xml.etree.ElementTree
 ########################################################################
 
 # By default use stable GitHub APIv3.
-# Use -b command line argument for GitHub beta import API.
+# Use -e command line argument for GitHub beta import API.
 USE_BETA_API = False
 # Beta import API application
 GITHUB_BETA_APP = "application/vnd.github.golden-comet-preview+json"
@@ -734,7 +734,7 @@ def current_githubdate():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def comment2dict(comment, attachments):
+def comment2dict(comment, attachments, used_attachments):
     """
     Converts Bugzilla comment to a string (stable APIv3)
     or a dictionary (beta import API).
@@ -742,8 +742,9 @@ def comment2dict(comment, attachments):
     body = []
 
     bug_when = comment.pop("bug_when")
+    commentid = comment.pop("commentid")
     body.extend([
-        "## Comment " + comment.pop("commentid"),
+        "## Comment " + commentid,
         "Date: " + bug_when,
         "From: " + email2login(comment.pop("who"),
                                comment.pop("who.name", None)),
@@ -752,9 +753,17 @@ def comment2dict(comment, attachments):
         "",
     ])
     # Convert attachments if any
+    # (several comments may reference the same attachment, and an
+    # attachment may be missing from the export)
     if "attachid" in comment:
+        attachid = comment.pop("attachid")
+        used_attachments.add(attachid)
+        if attachid not in attachments:
+            print("WARNING: attachment %s referenced by comment %s "
+                  "is missing from the export" % (attachid, commentid))
         body.extend([
-            attachments.pop(comment.pop("attachid")),
+            attachments.get(attachid,
+                            "Attachment %s: (not available)" % attachid),
             ""
         ])
     body.append("")
@@ -779,7 +788,7 @@ def comment2dict(comment, attachments):
         return "\n".join(body)
 
 
-def comments2list(comments, attachments):
+def comments2list(comments, attachments, used_attachments):
     """
     Converts Bugzilla comments to a list of
     strings (stable APIv3) or dictionaries (beta import API).
@@ -787,9 +796,10 @@ def comments2list(comments, attachments):
     issue = []
     if isinstance(comments, list):
         for comment in comments:
-            issue.append(comment2dict(comment, attachments))
+            issue.append(comment2dict(comment, attachments,
+                                      used_attachments))
     else:
-        issue.append(comment2dict(comments, attachments))
+        issue.append(comment2dict(comments, attachments, used_attachments))
 
     return issue
 
@@ -808,12 +818,14 @@ def bug2issue(bug):
     """
     issue = new_issue(bug.pop("bug_id"), False)
     attachments = {}
+    used_attachments = set()
 
     # Convert attachments if any
     if "attachment" in bug:
         attachments = attachments2dict(bug.pop("attachment"))
     # Convert long_desc and attachment to comments
-    issue["comments"].extend(comments2list(bug.pop("long_desc"), attachments))
+    issue["comments"].extend(comments2list(bug.pop("long_desc"), attachments,
+                                           used_attachments))
     # Convert short_desc to title
     issue["title"] = ("%s (" % bug.pop("short_desc") + BUG_SIGNATURE
                       + "%d)" % issue["id"])
@@ -897,9 +909,11 @@ def bug2issue(bug):
         print("WARNING: unconverted bug fields:")
         fields_dump(bug)
     # Make sure we have converted all the attachments
-    if attachments:
+    unused = {k: v for k, v in attachments.items()
+              if k not in used_attachments}
+    if unused:
         print("WARNING: unused attachments:")
-        fields_dump(attachments)
+        fields_dump(unused)
 
     return issue
 
