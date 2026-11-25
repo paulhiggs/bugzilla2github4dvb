@@ -73,6 +73,12 @@ GITHUB_REPO = ""
 GITHUB_TOKEN = ""
 # Maximum length of a GitHub label name
 GITHUB_LABEL_MAX = 50
+# Number of attempts for each GitHub request (network errors, rate limits)
+GITHUB_RETRIES = 10
+# Timeout for each GitHub request, in seconds
+GITHUB_TIMEOUT = 60
+# Pause after each request that changes GitHub, in seconds
+GITHUB_WRITE_DELAY = 1
 
 # Global convertion dictionaries
 EMAIL2LOGIN = {
@@ -227,10 +233,12 @@ def github_issue_get(id):
         A json-encoded issue or None if issue #id does not exist on GitHub.
     """
     req = github_get("issues/%d" % id)
-    if req:
-        return req.json()
-    else:
+    if req.status_code in (404, 410):
         return None
+    if not req:
+        print("Error getting issue #%d from GitHub:\n%s" % (id, req.text))
+        exit(1)
+    return req.json()
 
 
 def github_issue_update(id, issue):
@@ -252,7 +260,8 @@ def github_issue_update(id, issue):
     # TODO: There is no update functionality in beta API,
     # so we use stable API to update the issue
     r = github_post("issues/%d" % id, issue,
-                    ["title", "body", "state", "labels", "assignees"])
+                    ["title", "body", "state", "labels", "assignees"],
+                    "PATCH")
     if not r:
         print("Error updating issue #%d on GitHub:\n%s" % (id, r.text))
         exit(1)
@@ -264,7 +273,8 @@ def github_issue_update(id, issue):
 
 def github_issue_add_stable(id, issue):
     # Note: this still does not guarantee the new issue will be added as #id
-    r = github_post("issues", issue, ["title", "body", "labels", "assignees"])
+    r = github_post("issues", issue,
+                    ["title", "body", "labels", "assignees"])
     if not r:
         print("Error adding a new issue on GitHub:\n%s" % r.text)
         exit(1)
@@ -370,72 +380,133 @@ def github_issue_add(id, issue):
         return github_issue_add_stable(id, issue)
 
 
-def github_get(url, params={}):
+def github_url(url):
     """
-    Sends GET request to GitHub or a specified URL.
+    Converts a short URL to a full GitHub API URL:
+         '/' -- the request is sent to main GitHub API URL + url string
+         'http://' or 'https://' -- the request is sent to the specified url
+         otherwise the request is sent to:
+            GitHub API URL + /repos/ + GitHub Owner + GitHub Repo + url
+    """
+    if url[0] == "/":
+        return GITHUB_API + url
+    if url.startswith("https://") or url.startswith("http://"):
+        return url
+    return "%s/repos/%s/%s/%s" % (GITHUB_API, GITHUB_OWNER, GITHUB_REPO, url)
+
+
+def github_headers():
+    """
+    Returns the request headers. The token always goes in the Authorization
+    header: GitHub no longer accepts it as an access_token query parameter.
+    """
+    return {
+        "Accept": GITHUB_BETA_APP if USE_BETA_API
+        else "application/vnd.github+json",
+        "Authorization": "token " + GITHUB_TOKEN,
+    }
+
+
+def github_request(method, url, data=None, params=None):
+    """
+    Sends a request to GitHub, retrying on network errors, server errors
+    and rate limits.
 
     Args:
-        url: A string with an URL to get. The URL might start with:
-             '/' -- the request is sent to main GitHub API URL + url string
-             'http://' or 'https://' -- the request is sent to the specified url
-             otherwise the request is sent to:
-                GitHub API URL + /repos/ + GitHub Owner + GitHub Repo + url
+        method: HTTP method, i.e. "GET", "POST" or "PATCH".
+        url: A short or full URL, see github_url().
+        data: An optional JSON string to send.
         params: An optional dictionary to be sent in the query.
-        headers: An optional dictionary to be sent in the headers.
+
+    Returns:
+        A response object. Exits if GitHub still fails after all retries.
+    """
+    u = github_url(url)
+    if DEBUG:
+        # It's insecure to dump the headers with the token
+        print("DEBUG %s: %s" % (method, u))
+        if data:
+            print("DEBUG DATA: " + data)
+
+    for attempt in range(1, GITHUB_RETRIES + 1):
+        try:
+            r = requests.request(method, u, params=params,
+                                 headers=github_headers(), data=data,
+                                 timeout=GITHUB_TIMEOUT)
+        except requests.exceptions.RequestException as e:
+            wait = min(2 ** attempt, 300)
+            print("WARNING: %s %s failed (%s), retrying in %ds..."
+                  % (method, u, e, wait))
+            time.sleep(wait)
+            continue
+
+        if r.status_code in (403, 429) and github_rate_limited(r):
+            wait = github_rate_limit_wait(r, attempt)
+            print("WARNING: GitHub rate limit reached, waiting %ds..." % wait)
+            time.sleep(wait)
+            continue
+        if r.status_code >= 500:
+            wait = min(2 ** attempt, 300)
+            print("WARNING: %s %s returned %d, retrying in %ds..."
+                  % (method, u, r.status_code, wait))
+            time.sleep(wait)
+            continue
+
+        if method != "GET":
+            # GitHub asks clients to pause between content-creating requests
+            time.sleep(GITHUB_WRITE_DELAY)
+        return r
+
+    print("Error: %s %s still failing after %d attempts"
+          % (method, u, GITHUB_RETRIES))
+    exit(1)
+
+
+def github_rate_limited(r):
+    """Checks whether a 403 or 429 response is a rate limit."""
+    return (r.status_code == 429
+            or "Retry-After" in r.headers
+            or r.headers.get("X-RateLimit-Remaining") == "0"
+            or "rate limit" in r.text.lower())
+
+
+def github_rate_limit_wait(r, attempt):
+    """Returns how many seconds to wait after a rate limit response."""
+    if "Retry-After" in r.headers:
+        return int(r.headers["Retry-After"]) + 1
+    if r.headers.get("X-RateLimit-Remaining") == "0":
+        reset = int(r.headers.get("X-RateLimit-Reset", "0"))
+        return max(reset - int(time.time()), 0) + 5
+    # Secondary rate limit with no hint: wait at least a minute
+    return 60 * attempt
+
+
+def github_get(url, params=None):
+    """
+    Sends GET request to GitHub or a specified URL (see github_url()).
 
     Returns:
         A response object.
     """
-    if url[0] == "/":
-        u = GITHUB_API + url
-    elif url.startswith("https://"):
-        u = url
-    elif url.startswith("http://"):
-        u = url
-    else:
-        u = "%s/repos/%s/%s/%s" % (GITHUB_API, GITHUB_OWNER, GITHUB_REPO, url)
-
-    if USE_BETA_API:
-        params = {}
-        headers = {
-            "Accept": GITHUB_BETA_APP,
-            "Authorization": "token " + GITHUB_TOKEN,
-        }
-    else:
-        params = {"access_token": GITHUB_TOKEN}
-        headers = {}
-
-    if DEBUG:
-        print("DEBUG GET: " + u)
-        # It's insecure to dump the token
-        # print("DEBUG PARAMS: " + json.dumps(params))
-        # print("DEBUG HEADERS: " + json.dumps(headers))
-
-    return requests.get(u, params=params, headers=headers)
+    return github_request("GET", url, params=params)
 
 
-def github_post(url, dict={}, fields=[]):
+def github_post(url, dict={}, fields=[], method="POST"):
     """
-    Sends POST request to a specified URL. If global flag FORCE_UPDATES
-    is not set, the function prints a warning and just returns True.
+    Sends POST (or PATCH) request to a specified URL (see github_url()).
+    If global flag FORCE_UPDATES is not set, the function prints a warning
+    and just returns True.
 
     Args:
-        url: A string with an URL to post. The URL might start with:
-             '/' -- the request is sent to main GitHub API URL + url string
-             otherwise the request is sent to:
-                GitHub API URL + /repos/ + GitHub Owner + GitHub Repo + url
+        url: A string with an URL to post.
         dict: An optional dictionary to be posted.
         fields: An optional list of fields to send from the dictionary.
+        method: "POST" to create, "PATCH" to update.
 
     Returns:
         A response object. If the global flag FORCE_UPDATES is not set, always
         returns True.
     """
-    if url[0] == "/":
-        u = "%s%s" % (GITHUB_API, url)
-    else:
-        u = "%s/repos/%s/%s/%s" % (GITHUB_API, GITHUB_OWNER, GITHUB_REPO, url)
-
     d = {}
     # Copy fields into the data
     for field in fields:
@@ -443,27 +514,14 @@ def github_post(url, dict={}, fields=[]):
             print("Error posting field '%s' to %s" % (field, url))
             exit(1)
         d[field] = dict[field]
-
-    if USE_BETA_API:
-        params = {}
-        headers = {
-            "Accept": GITHUB_BETA_APP,
-            "Authorization": "token " + GITHUB_TOKEN,
-        }
-    else:
-        params = {"access_token": GITHUB_TOKEN}
-        headers = {}
     data = json.dumps(d)
-    if DEBUG:
-        print("DEBUG POST: " + u)
-        # It's insecure to dump the token
-        # print("DEBUG PARAMS: " + json.dumps(params))
-        # print("DEBUG HEADERS: " + json.dumps(headers))
-        print("DEBUG DATA: " + json.dumps(d))
 
     if FORCE_UPDATES:
-        return requests.post(u, params=params, headers=headers, data=data)
+        return github_request(method, url, data=data)
     else:
+        if DEBUG:
+            print("DEBUG %s (skipped): %s" % (method, github_url(url)))
+            print("DEBUG DATA: " + data)
         if not github_post.POST_WARNING_PRINTED:
             print("Skipping POST... (use -f to force updates)")
             github_post.POST_WARNING_PRINTED = True
@@ -512,7 +570,7 @@ def github_comment_update(orig_id, new_id):
                   % (comment_id, orig_id))
             comment = new_renumber_comment(orig_id, new_id)
             r = github_post("issues/comments/%d" %
-                            comment_id, comment, ["body"])
+                            comment_id, comment, ["body"], "PATCH")
             if not r:
                 print("Error updating comment %d on GitHub issue #%d:\n%s"
                       % (comment_id, orig_id, r.text))
@@ -555,11 +613,16 @@ def github_labels_create(issues):
                                 for label in issues[id]["labels"]]
 
     for label in sorted(canonical.values()):
-        if github_get("labels/" + quote(label, safe="")):
+        r = github_get("labels/" + quote(label, safe=""))
+        if r:
             print("\tlabel '%s' exists on GitHub" % label)
+        elif r.status_code != 404:
+            print("Error checking label '%s' on GitHub:\n%s" % (label, r.text))
+            exit(1)
         else:
             print("WARNING: label '%s' does not exist on GitHub" % label)
             github_label_create(label)
+
 
 
 def github_assignees_check(issues):
