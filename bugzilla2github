@@ -1055,6 +1055,11 @@ def link_text(text):
     return text2markdown(text).replace("[", r"\[").replace("]", r"\]")
 
 
+def bugzilla_bug_url(bug_id):
+    """Returns the URL of a bug on Bugzilla."""
+    return "%s/show_bug.cgi?id=%d" % (BUGZILLA_URL.rstrip("/"), bug_id)
+
+
 def bugzilla_attachment_fetch(id, size, path):
     """
     Fetches an attachment file with the Bugzilla REST API into the local
@@ -1181,6 +1186,9 @@ def attachment2dict(bug_id, attach):
         issue.append("> Last modified: " + modified)
     if patch:
         issue.append("> Flags:         patch")
+    if BUGZILLA_URL:
+        issue.append("> Bugzilla:      <%s/attachment.cgi?id=%s>"
+                     % (BUGZILLA_URL.rstrip("/"), id))
     if obsolete:
         issue.append("> **This attachment is obsolete.**")
     if upload and content_type.startswith("image/"):
@@ -1319,6 +1327,9 @@ def comment2dict(bug_id, comment, attachments, used_attachments):
         "From: " + email2login(comment.pop("who"),
                                comment.pop("who.name", None)),
     ])
+    if BUGZILLA_URL and number:
+        # Bugzilla's own anchor for the comment is its number within the bug
+        body.append("Bugzilla: <%s#c%s>" % (bugzilla_bug_url(bug_id), number))
     body.extend([
         "",
         refs2links(text2markdown(comment.pop("thetext", "")), bug_id),
@@ -1459,6 +1470,8 @@ def bug2issue(bug):
         "From: " + user_login,
         "To:   " + ", ".join(issue["assignees"]),
     ])
+    if BUGZILLA_URL:
+        body.append("Bugzilla: <%s>" % bugzilla_bug_url(issue["id"]))
     if "cc" in bug:
         body.append("CC:   " + emails2logins(bug.pop("cc")))
     # Extra information
@@ -1710,7 +1723,8 @@ def usage():
     print("\t-o <GitHub owner> -r <GitHub repo> -t <GitHub access token>")
     print("\t[-b <Bugzilla URL> [-k <Bugzilla API key>] [-c <cache folder>]]")
     print("Where:")
-    print("\t-b  fetch the attachment files from this Bugzilla and upload")
+    print("\t-b  link each issue, comment and attachment back to this")
+    print("\t    Bugzilla, and fetch the attachment files from it to upload")
     print("\t    them to the '%s' folder of the GitHub repo"
           % GITHUB_ATTACHMENTS_DIR)
     print("\t-k  Bugzilla API key, if Bugzilla requires a login")
