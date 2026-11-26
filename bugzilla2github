@@ -186,6 +186,9 @@ ATTACHMENT_UNUSED_FIELDS = [
     "isprivate",
     "token",
 ]
+# Comment ids of each bug by comment number (as Bugzilla numbers them, the
+# description being comment 0), for links to comments: {bug: {number: id}}
+COMMENT_IDS = {}
 
 
 ########################################################################
@@ -1231,7 +1234,73 @@ def current_githubdate():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def comment2dict(comment, attachments, used_attachments):
+# "bug 123" and "bug 123, comment 4", or just "comment #4" (also "comments")
+BUG_COMMENT_REF = re.compile(
+    r"(?i)\b(bug)\s+#?([0-9]+)"
+    r"(?:(,?[ \t]+)(comments?(?:[ \t]+#?|[ \t]*#))([0-9]+))?"
+    r"|\b(comments?(?:[ \t]+#?|[ \t]*#))([0-9]+)")
+
+
+def comment_ref(bug_id, text, number):
+    """
+    Converts a reference to comment number (as Bugzilla numbers them within
+    each bug, the description being comment 0) of a bug into a link to that
+    comment's "## Comment <id>" heading.
+
+    Args:
+        bug_id: The bug the comment belongs to.
+        text: The reference text before the number, i.e. "comment #".
+        number: The comment number, as a string.
+    """
+    commentid = COMMENT_IDS.get(bug_id, {}).get(int(number))
+    if commentid and not USE_BETA_API:
+        if bug_id == comment_ref.current_bug:
+            url = "#comment-%s" % commentid
+        else:
+            url = "%s/%s/%s/issues/%d#comment-%s" % (
+                GITHUB_WEB, GITHUB_OWNER, GITHUB_REPO, bug_id, commentid)
+        # GitHub does not turn "#4" into an issue link inside a link
+        return "[%s%s](%s)" % (text, number, url)
+    # No heading to link to (i.e. beta import API, where the comments are
+    # separate): a zero-width space stops "#4" linking to issue #4
+    return text.replace("#", "#​") + number
+
+
+# The bug whose comments are being converted, see comment_ref()
+comment_ref.current_bug = 0
+
+
+def refs2links(text, bug_id, comments=True):
+    """
+    Converts "bug 123" to "bug #123", which GitHub links to the issue, and
+    references to comments to links to their headings (see comment_ref()).
+
+    Args:
+        text: Text already converted with text2markdown().
+        bug_id: The bug the text belongs to.
+        comments: Set False to leave the references to comments as they are,
+                  i.e. inside link text.
+    """
+    def ref(m):
+        if m.group(1):
+            bug = int(m.group(2))
+            result = "%s #%d" % (m.group(1), bug)
+            if m.group(4):
+                result += m.group(3)
+                if comments:
+                    result += comment_ref(bug, m.group(4), m.group(5))
+                else:
+                    result += m.group(4) + m.group(5)
+            return result
+        if not comments:
+            return m.group(0)
+        return comment_ref(bug_id, m.group(6), m.group(7))
+
+    comment_ref.current_bug = bug_id
+    return BUG_COMMENT_REF.sub(ref, text)
+
+
+def comment2dict(bug_id, comment, attachments, used_attachments):
     """
     Converts Bugzilla comment to a string (stable APIv3)
     or a dictionary (beta import API).
@@ -1240,13 +1309,19 @@ def comment2dict(comment, attachments, used_attachments):
 
     bug_when = comment.pop("bug_when")
     commentid = comment.pop("commentid")
+    number = comment.pop("comment_count", "")
     body.extend([
+        # Explicit anchor for the links to this comment, see comment_ref()
+        '<a name="comment-%s"></a>' % commentid,
+        "",
         "## Comment " + commentid,
         "Date: " + bug_when,
         "From: " + email2login(comment.pop("who"),
                                comment.pop("who.name", None)),
+    ])
+    body.extend([
         "",
-        text2markdown(comment.pop("thetext", "")),
+        refs2links(text2markdown(comment.pop("thetext", "")), bug_id),
         "",
     ])
     # Convert attachments if any
@@ -1261,12 +1336,9 @@ def comment2dict(comment, attachments, used_attachments):
         text = "Attachment %s: (not available)" % attachid
         if attachid in attachments:
             text = attachments[attachid]["text"]
-        body.extend([text, ""])
+        # The attachment text has links: only convert "bug id" to "bug #id"
+        body.extend([refs2links(text, bug_id, comments=False), ""])
     body.append("")
-
-    # Syntax: convert "bug id" to "bug #id"
-    for i, val in enumerate(body):
-        body[i] = re.sub(r"(?i)(bug)\s+([0-9]+)", r"\1 #\2", val)
 
     # Ignore some comment fields
     fields_ignore(comment, COMMENT_UNUSED_FIELDS)
@@ -1284,20 +1356,15 @@ def comment2dict(comment, attachments, used_attachments):
         return "\n".join(body)
 
 
-def comments2list(comments, attachments, used_attachments):
+def comments2list(bug_id, comments, attachments, used_attachments):
     """
     Converts Bugzilla comments to a list of
     strings (stable APIv3) or dictionaries (beta import API).
     """
-    issue = []
-    if isinstance(comments, list):
-        for comment in comments:
-            issue.append(comment2dict(comment, attachments,
-                                      used_attachments))
-    else:
-        issue.append(comment2dict(comments, attachments, used_attachments))
-
-    return issue
+    if not isinstance(comments, list):
+        comments = [comments]
+    return [comment2dict(bug_id, comment, attachments, used_attachments)
+            for comment in comments]
 
 
 def bug2issue(bug):
@@ -1334,8 +1401,8 @@ def bug2issue(bug):
         print("WARNING: bug %d has no creation_ts, using comment %s date %s"
               % (issue["id"], first.get("commentid"), bug["creation_ts"]))
     # Convert long_desc and attachment to comments
-    issue["comments"].extend(comments2list(bug.pop("long_desc"), attachments,
-                                           used_attachments))
+    issue["comments"].extend(comments2list(issue["id"], bug.pop("long_desc"),
+                                           attachments, used_attachments))
     # Convert short_desc to title
     issue["title"] = ("%s (" % bug.pop("short_desc") + BUG_SIGNATURE
                       + "%d)" % issue["id"])
@@ -1502,6 +1569,18 @@ def bugs2dict(xml_root):
     Returns:
         A new dictionary of converted Bugzilla reports.
     """
+    # Comment numbers of all the bugs first, as comments may refer to the
+    # comments of other bugs
+    COMMENT_IDS.clear()
+    for xml_bug in xml_root.iter("bug"):
+        ids = COMMENT_IDS.setdefault(int(xml_bug.findtext("bug_id")), {})
+        for number, xml_comment in enumerate(xml_bug.iter("long_desc")):
+            # Bugzilla 5 exports the comment number as comment_count
+            count = xml_comment.findtext("comment_count")
+            if count and count.isdigit():
+                number = int(count)
+            ids[number] = xml_comment.findtext("commentid")
+
     issues = {}
     for xml_bug in xml_root.iter("bug"):
         bug = XML2bug(xml_bug)
