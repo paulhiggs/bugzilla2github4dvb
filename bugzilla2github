@@ -1801,6 +1801,11 @@ def main(argv):
     Steps to convert Bugzilla exported bugs and post them on GitHub.
     """
     global GITHUB_BRANCH
+    # Bugzilla text and file names may have characters the console cannot
+    # show (i.e. cp1252 on Windows): print them escaped rather than crash
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="backslashreplace")
     args_parse(argv)
     print("===> Converting Bugzilla Bugs to GitHub Issues...")
     print("\tSource XML file:          %s" % XML_FILE)
