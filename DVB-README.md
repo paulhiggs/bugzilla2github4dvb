@@ -184,10 +184,21 @@ DVB bugs take roughly 12–14 hours.
 - [ ] **`comment #N` links.** Rewrite `comment #N` in Bugzilla text so it
       does not link to GitHub issue #N, for example to link to the
       `## Comment` heading in the same issue.
-- [ ] **Attachment files.** Export them from Bugzilla (the XML export can
-      include attachment data). Store them in a repository or as release
-      assets, and link them from the issues. The GitHub API cannot attach
-      files to issues.
+- [ ] **Attachment files.** Include the attachments themselves in the GitHub
+      issues. The XML export only describes them: 312 attachments in the DVB
+      export. For example, bug 3419 has three Word documents (attachments
+      312, 313 and 315), and only their names and sizes reach GitHub.
+  - Fetch the files with the
+    [Bugzilla 5.2 REST API](https://bugzilla.readthedocs.io/en/5.2/api/index.html):
+    `GET /rest/bug/{bug_id}/attachment` lists a bug's attachments with their
+    contents (base64 `data`), and `GET /rest/bug/attachment/{attachment_id}`
+    fetches one. An API key may be needed for restricted bugs.
+  - The GitHub API cannot attach files to issues, so store the files in the
+    repository, for example `attachments/<bug>/<attachment id>-<filename>`,
+    or as release assets. Then link each one from the comment that added it.
+    Images could be shown inline.
+  - Keep each attachment's details: who attached it, when, and whether it is
+    obsolete or a patch.
 - [ ] **Links back to Bugzilla.** Add a link to the original bug
       (`https://bugzilla.dvb.org/show_bug.cgi?id=N`) while `bugzilla.dvb.org`
       is still online.
