@@ -1,3 +1,9 @@
+> **bugzilla2github4dvb:** this repository,
+> [paulhiggs/bugzilla2github4dvb](https://github.com/paulhiggs/bugzilla2github4dvb),
+> is a fork used to migrate the DVB Bugzilla to GitHub Issues. Its changes
+> are described in [DVB-README.md](DVB-README.md). The text below is the
+> original project's README.
+
 ABOUT
 =====
 This is a tool to convert Bugzilla bug reports to GitHub Issue Tracker
