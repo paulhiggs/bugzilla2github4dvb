@@ -31,8 +31,11 @@
 
 from __future__ import absolute_import
 from __future__ import print_function
+import base64
+import hashlib
 import json
 import getopt
+import mimetypes
 import os
 import re
 import requests
@@ -79,6 +82,22 @@ GITHUB_RETRIES = 10
 GITHUB_TIMEOUT = 60
 # Pause after each request that changes GitHub, in seconds
 GITHUB_WRITE_DELAY = 1
+# GitHub web URL, for links to the uploaded attachment files
+GITHUB_WEB = "https://github.com"
+# Folder in the GitHub repository for the attachment files
+GITHUB_ATTACHMENTS_DIR = "attachments"
+# Branch the attachment files are linked to (the repository's default
+# branch, read from GitHub)
+GITHUB_BRANCH = ""
+# Bugzilla URL, i.e. https://bugzilla.example.org (-b). When it is set, the
+# attachment files are fetched with the Bugzilla REST API and uploaded to
+# the GitHub repository.
+BUGZILLA_URL = ""
+# Bugzilla API key (-k), needed when Bugzilla requires a login
+BUGZILLA_API_KEY = ""
+# Local folder where the fetched attachment files are kept, so each one is
+# fetched only once. Defaults to "attachments" next to the XML file.
+ATTACHMENTS_CACHE = ""
 
 # Global convertion dictionaries
 EMAIL2LOGIN = {
@@ -334,6 +353,7 @@ def github_issue_add_beta(id, issue):
 
     # Convert issue to beta import API
     comments = issue.pop("comments", [])
+    attachments = issue.pop("attachments", [])
     assignees = issue.pop("assignees", [])
     if len(assignees) > 0:
         issue["assignee"] = assignees[0]
@@ -352,6 +372,7 @@ def github_issue_add_beta(id, issue):
     issue["id"] = old_id
     issue["milestone"] = milestone
     issue["assignees"] = assignees
+    issue["attachments"] = attachments
 
     if FORCE_UPDATES:
         # Wait until the issue is imported
@@ -731,6 +752,68 @@ def github_milestones_create(issues):
             issues[id]["milestone"] = milestones.get(title)
 
 
+def github_branch_get():
+    """Returns the default branch of the GitHub repository."""
+    r = github_get("/repos/%s/%s" % (GITHUB_OWNER, GITHUB_REPO))
+    if not r:
+        print("Error getting repository %s/%s from GitHub:\n%s"
+              % (GITHUB_OWNER, GITHUB_REPO, r.text))
+        exit(1)
+    return r.json().get("default_branch") or "main"
+
+
+def git_blob_sha(data):
+    """Returns the git blob SHA-1 of the data, as GitHub reports it."""
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def github_attachment_upload(attachment):
+    """
+    Uploads an attachment file to the GitHub repository, unless the same
+    file is already there.
+
+    Args:
+        attachment: The "upload" dictionary made by attachment2dict().
+    """
+    with open(attachment["local"], "rb") as f:
+        data = f.read()
+    url = "contents/" + quote(attachment["path"])
+    content = {
+        "message": "Add attachment %s of Bugzilla Bug %d"
+                   % (attachment["id"], attachment["bug"]),
+        "content": base64.b64encode(data).decode("ascii"),
+    }
+
+    r = github_get(url)
+    if r.status_code == 200 and isinstance(r.json(), dict):
+        sha = r.json().get("sha")
+        if sha == git_blob_sha(data):
+            print("\tattachment %s is up to date on GitHub, skipping..."
+                  % attachment["path"])
+            return
+        content["sha"] = sha
+        content["message"] = ("Update attachment %s of Bugzilla Bug %d"
+                              % (attachment["id"], attachment["bug"]))
+    elif r.status_code != 404:
+        print("Error getting %s from GitHub:\n%s"
+              % (attachment["path"], r.text))
+        exit(1)
+
+    print("\tuploading attachment %s to GitHub..." % attachment["path"])
+    r = github_post(url, content, list(content), "PUT")
+    if not r:
+        print("Error uploading %s to GitHub:\n%s"
+              % (attachment["path"], r.text))
+        exit(1)
+
+
+def github_attachments_upload(issues):
+    """Uploads the attachment files of all the issues to GitHub."""
+    for id in sorted(issues):
+        for attachment in issues[id]["attachments"]:
+            github_attachment_upload(attachment)
+
+
 def github_assignees_check(issues):
     """
     Checks if all the users assigned to all the issues are on GitHub.
@@ -947,16 +1030,145 @@ def fields_dump(obj):
         print("\t%s[%d] = %s" % (key, len(val), val))
 
 
-def attachment2str(idx, attach):
-    """Converts Bugzilla attachment to a string."""
+def attachment_filename(id, filename, content_type):
+    """
+    Returns the file name an attachment is stored under: the Bugzilla
+    attachment id, then the Bugzilla file name. Characters that are not
+    allowed in file names are replaced, and an extension is added from the
+    content type when the file name has none.
+    """
+    name = re.sub(r'[\x00-\x1f\\/:*?"<>|]', "_", filename).strip(" .")
+    if not name:
+        name = "attachment"
+    if not os.path.splitext(name)[1]:
+        ext = mimetypes.guess_extension(content_type.split(";")[0].strip())
+        if ext:
+            name += ext
+    return "%s-%s" % (id, name)
+
+
+def link_text(text):
+    """Escapes text to be shown inside a Markdown link or image."""
+    return text2markdown(text).replace("[", r"\[").replace("]", r"\]")
+
+
+def bugzilla_attachment_fetch(id, size, path):
+    """
+    Fetches an attachment file with the Bugzilla REST API into the local
+    cache, unless it is already there.
+
+    Args:
+        id: Bugzilla attachment id.
+        size: Size of the attachment in the XML export, in bytes.
+        path: Local file to save the attachment into.
+
+    Returns:
+        True if the file is in the local cache, False otherwise.
+    """
+    if os.path.isfile(path) and os.path.getsize(path) == size:
+        return True
+    url = "%s/rest/bug/attachment/%s" % (BUGZILLA_URL.rstrip("/"), id)
+    headers = {"Accept": "application/json"}
+    params = {"include_fields": "data,size"}
+    if BUGZILLA_API_KEY:
+        # Some Bugzilla servers ignore the X-BUGZILLA-API-KEY header, so the
+        # key goes in the query
+        params["api_key"] = BUGZILLA_API_KEY
+    print("\tfetching attachment %s from Bugzilla..." % id)
+
+    r = None
+    for attempt in range(1, GITHUB_RETRIES + 1):
+        try:
+            r = requests.get(url, headers=headers, params=params,
+                             timeout=GITHUB_TIMEOUT)
+        except requests.exceptions.RequestException as e:
+            r = None
+            # The error may contain the URL: do not print the API key
+            error = str(e)
+            if BUGZILLA_API_KEY:
+                error = error.replace(BUGZILLA_API_KEY, "<API key>")
+            print("WARNING: fetching attachment %s failed (%s), retrying..."
+                  % (id, error))
+            time.sleep(min(2 ** attempt, 300))
+            continue
+        if r.status_code >= 500:
+            print("WARNING: fetching attachment %s returned %d, retrying..."
+                  % (id, r.status_code))
+            time.sleep(min(2 ** attempt, 300))
+            continue
+        break
+    if r is None or r.status_code >= 500:
+        print("WARNING: unable to fetch attachment %s from Bugzilla" % id)
+        return False
+
+    try:
+        answer = r.json()
+    except ValueError:
+        answer = {}
+    if r.status_code == 401 or answer.get("code") in (410, 306):
+        # Login required or wrong API key: no attachment can be fetched
+        print("Error fetching attachment %s from Bugzilla: %s\n"
+              "Please give a valid Bugzilla API key with -k"
+              % (id, answer.get("message", r.text)))
+        exit(1)
+    try:
+        data = base64.b64decode(answer["attachments"][str(id)]["data"])
+    except (KeyError, TypeError, ValueError):
+        print("WARNING: unable to fetch attachment %s from Bugzilla "
+              "(HTTP %d): %s" % (id, r.status_code,
+                                 answer.get("message", r.text[:200])))
+        return False
+    if len(data) != size:
+        print("WARNING: attachment %s is %d bytes on Bugzilla, but %d bytes "
+              "in the XML export" % (id, len(data), size))
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(data)
+    return True
+
+
+def attachment2dict(bug_id, attach):
+    """
+    Converts Bugzilla attachment to a dictionary with:
+        "text": the text shown in the comment that added the attachment
+        "row": the row in the issue's attachments table
+        "upload": the file to upload to GitHub, or None
+    """
     issue = []
 
     id = attach.pop("attachid")
-    issue.append("> Attached file: %s (%s, %s bytes)"
-                 % (attach.pop("filename"),
-                    attach.pop("type"),
-                    attach.pop("size")))
-    issue.append("> Description:   " + text2markdown(attach.pop("desc")))
+    filename = attach.pop("filename")
+    content_type = attach.pop("type")
+    size = attach.pop("size")
+    desc = attach.pop("desc")
+    obsolete = attach.pop("isobsolete", "0") == "1"
+    patch = attach.pop("ispatch", "0") == "1"
+
+    # Fetch the file from Bugzilla, so it can be uploaded to GitHub
+    upload = None
+    if BUGZILLA_URL:
+        name = attachment_filename(id, filename, content_type)
+        repo_path = "%s/%d/%s" % (GITHUB_ATTACHMENTS_DIR, bug_id, name)
+        local_path = os.path.join(ATTACHMENTS_CACHE, str(bug_id), name)
+        if bugzilla_attachment_fetch(id, int(size), local_path):
+            upload = {"bug": bug_id, "id": id, "path": repo_path,
+                      "local": local_path,
+                      "url": "%s/%s/%s/blob/%s/%s"
+                      % (GITHUB_WEB, GITHUB_OWNER, GITHUB_REPO,
+                         quote(GITHUB_BRANCH), quote(repo_path))}
+
+    # The file name, linked to the uploaded file when there is one.
+    # Obsolete attachments are struck through, as Bugzilla shows them.
+    shown = link_text(filename)
+    if upload:
+        shown = "[%s](%s)" % (shown, upload["url"])
+    if obsolete:
+        shown = "~~%s~~ **(obsolete)**" % shown
+
+    issue.append("> Attachment %s: %s (%s, %s bytes)"
+                 % (id, shown, text2markdown(content_type), size))
+    issue.append("> Description:   " + text2markdown(desc))
     issue.append("> Attached by:   %s on %s"
                  % (email2login(attach.pop("attacher", ""),
                                 attach.pop("attacher.name", None)),
@@ -964,14 +1176,25 @@ def attachment2str(idx, attach):
     modified = attach.pop("delta_ts", "")
     if modified:
         issue.append("> Last modified: " + modified)
-    flags = []
-    if attach.pop("ispatch", "0") == "1":
-        flags.append("patch")
-    if attach.pop("isobsolete", "0") == "1":
-        flags.append("obsolete")
-    if flags:
-        issue.append("> Flags:         " + ", ".join(flags))
-    issue.append("> (the attachment contents were not exported from Bugzilla)")
+    if patch:
+        issue.append("> Flags:         patch")
+    if obsolete:
+        issue.append("> **This attachment is obsolete.**")
+    if upload and content_type.startswith("image/"):
+        issue.append(">")
+        issue.append("> ![%s](%s?raw=true)" % (link_text(desc), upload["url"]))
+    elif not upload:
+        if BUGZILLA_URL:
+            issue.append("> (the attachment file could not be fetched "
+                         "from Bugzilla)")
+        else:
+            issue.append("> (the attachment contents were not exported "
+                         "from Bugzilla)")
+
+    row = "| %s | %s | %s | %s |" % (
+        id, shown.replace("|", r"\|"),
+        text2markdown(desc.replace("\n", " ")).replace("|", r"\|"),
+        text2markdown(content_type).replace("|", r"\|"))
 
     # Ignore some fields
     fields_ignore(attach, ATTACHMENT_UNUSED_FIELDS)
@@ -980,19 +1203,18 @@ def attachment2str(idx, attach):
         print("WARNING: unconverted attachment fields:")
         fields_dump(attach)
 
-    idx[id] = "\n".join(issue)
+    return {"text": "\n".join(issue), "row": row, "upload": upload}
 
 
-def attachments2dict(attachments):
-    """Converts Bugzilla attachments to a dictionary of strings."""
-    issue = {}
-    if isinstance(attachments, list):
-        for attachment in attachments:
-            attachment2str(issue, attachment)
-    else:
-        attachment2str(issue, attachments)
-
-    return issue
+def attachments2dict(bug_id, attachments):
+    """Converts Bugzilla attachments to a dictionary by attachment id."""
+    if not isinstance(attachments, list):
+        attachments = [attachments]
+    result = {}
+    for attachment in attachments:
+        id = attachment["attachid"]
+        result[id] = attachment2dict(bug_id, attachment)
+    return result
 
 
 def bugzilladate2githubdate(date):
@@ -1036,11 +1258,10 @@ def comment2dict(comment, attachments, used_attachments):
         if attachid not in attachments:
             print("WARNING: attachment %s referenced by comment %s "
                   "is missing from the export" % (attachid, commentid))
-        body.extend([
-            attachments.get(attachid,
-                            "Attachment %s: (not available)" % attachid),
-            ""
-        ])
+        text = "Attachment %s: (not available)" % attachid
+        if attachid in attachments:
+            text = attachments[attachid]["text"]
+        body.extend([text, ""])
     body.append("")
 
     # Syntax: convert "bug id" to "bug #id"
@@ -1097,7 +1318,9 @@ def bug2issue(bug):
 
     # Convert attachments if any
     if "attachment" in bug:
-        attachments = attachments2dict(bug.pop("attachment"))
+        attachments = attachments2dict(issue["id"], bug.pop("attachment"))
+    issue["attachments"] = [a["upload"] for a in attachments.values()
+                            if a["upload"]]
     # Some exports have an empty creation_ts: fall back to the bug_when
     # of the first comment (the bug description)
     if not bug.get("creation_ts"):
@@ -1232,6 +1455,13 @@ def bug2issue(bug):
             value = text2markdown(value.replace("\n", " ")).replace("|", r"\|")
             body.append("| %s | %s |" % (name, value))
     body.append("")
+    # All the attachments, so they can be found without reading every comment
+    if attachments:
+        body.append("| Attachment | File | Description | Type |")
+        body.append("| --- | --- | --- | --- |")
+        for id in sorted(attachments, key=int):
+            body.append(attachments[id]["row"])
+        body.append("")
 
     # Put everything together
     if USE_BETA_API:
@@ -1308,6 +1538,7 @@ def new_issue(id, dummy):
     issue["labels"] = []
     issue["assignees"] = []
     issue["comments"] = []
+    issue["attachments"] = []
     issue["milestone"] = None
     issue["id"] = int(id)
     issue["title"] = DELETED_BUG_SIGNATURE
@@ -1398,7 +1629,14 @@ def usage():
     print("Usage: %s [-e] [-h] [-f] [-d]" % NAME)
     print("\t[-x <src XML file>]")
     print("\t-o <GitHub owner> -r <GitHub repo> -t <GitHub access token>")
+    print("\t[-b <Bugzilla URL> [-k <Bugzilla API key>] [-c <cache folder>]]")
     print("Where:")
+    print("\t-b  fetch the attachment files from this Bugzilla and upload")
+    print("\t    them to the '%s' folder of the GitHub repo"
+          % GITHUB_ATTACHMENTS_DIR)
+    print("\t-k  Bugzilla API key, if Bugzilla requires a login")
+    print("\t-c  local folder for the fetched attachment files")
+    print("\t    (default: 'attachments' next to the XML file)")
     print("\t-e  use GitHub beta import API")
     print("\t-h  usage information")
     print("\t-f  force updates (actually post the changes to GitHub)")
@@ -1415,9 +1653,10 @@ def args_parse(argv):
     """
     global FORCE_UPDATES, DEBUG, USE_BETA_API
     global XML_FILE, GITHUB_OWNER, GITHUB_REPO, GITHUB_TOKEN
+    global BUGZILLA_URL, BUGZILLA_API_KEY, ATTACHMENTS_CACHE
 
     try:
-        opts, _ = getopt.getopt(argv, "ehfdo:r:t:x:")
+        opts, _ = getopt.getopt(argv, "ehfdo:r:t:x:b:k:c:")
     except getopt.GetoptError:
         usage()
     for opt, arg in opts:
@@ -1445,6 +1684,15 @@ def args_parse(argv):
             GITHUB_TOKEN = arg
         elif opt == "-x":
             XML_FILE = arg
+        elif opt == "-b":
+            BUGZILLA_URL = arg
+        elif opt == "-k":
+            BUGZILLA_API_KEY = arg
+        elif opt == "-c":
+            ATTACHMENTS_CACHE = arg
+    if not ATTACHMENTS_CACHE:
+        ATTACHMENTS_CACHE = os.path.join(os.path.dirname(XML_FILE),
+                                         "attachments")
 
     # Check the arguments
     if (not XML_FILE or not GITHUB_OWNER or not GITHUB_REPO or
@@ -1459,6 +1707,7 @@ def main(argv):
     """
     Steps to convert Bugzilla exported bugs and post them on GitHub.
     """
+    global GITHUB_BRANCH
     args_parse(argv)
     print("===> Converting Bugzilla Bugs to GitHub Issues...")
     print("\tSource XML file:          %s" % XML_FILE)
@@ -1468,10 +1717,20 @@ def main(argv):
         print("\tDebug information:        on")
     if USE_BETA_API:
         print("\tUsing beta import API:    on")
+    if BUGZILLA_URL:
+        GITHUB_BRANCH = github_branch_get()
+        print("\tAttachments from:         %s" % BUGZILLA_URL)
+        print("\tAttachments cache:        %s" % ATTACHMENTS_CACHE)
+        print("\tAttachments uploaded to:  %s/ on branch %s"
+              % (GITHUB_ATTACHMENTS_DIR, GITHUB_BRANCH))
 
     xml_tree = xml.etree.ElementTree.parse(XML_FILE)
     xml_root = xml_tree.getroot()
     issues = bugs2dict(xml_root)
+
+    if BUGZILLA_URL:
+        print("===> Uploading the attachment files to GitHub...")
+        github_attachments_upload(issues)
 
     print("===> Checking if all the labels exist on GitHub...")
     github_labels_create(issues)
