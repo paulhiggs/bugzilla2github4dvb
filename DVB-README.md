@@ -155,3 +155,44 @@ DVB bugs take roughly 12–14 hours.
 - **Bug references.** `bug 123` in text becomes `bug #123`, which links to
   that issue. `comment #3` in Bugzilla text also links to issue #3, not to a
   comment.
+
+## To do
+
+### Before a permanent migration
+
+- [ ] **GitHub logins for contributors.** Collect contributors' GitHub logins.
+      Have the script read the email-to-login mapping from a local CSV file
+      given on the command line, rather than from `EMAIL2LOGIN` in the script,
+      so the addresses are not published in this repository. Mapped users
+      become @mentions and assignees.
+- [ ] **Email addresses in comment text.** About 300 full addresses appear
+      in comment text, mostly quoted emails. Shorten them, as is already done
+      in the issue headers.
+- [ ] **Members-only bugs.** Decide what to do with bugs that were
+      restricted to a group in Bugzilla (7 in the DVB export, `DVB-members`)
+      before any repository is made public. Options are to skip them or to
+      leave out their text.
+- [ ] **"Trash" product.** Decide whether its 15 bugs should be migrated, or
+      skipped with a command line option.
+- [ ] **Original dates and separate comments.** Test the beta import API
+      (`-e`). It may keep Bugzilla's created and closed dates and post each
+      comment as a dated GitHub comment, in one request per issue. GitHub may
+      no longer support it.
+
+### Improvements
+
+- [ ] **`comment #N` links.** Rewrite `comment #N` in Bugzilla text so it
+      does not link to GitHub issue #N, for example to link to the
+      `## Comment` heading in the same issue.
+- [ ] **Attachment files.** Export them from Bugzilla (the XML export can
+      include attachment data). Store them in a repository or as release
+      assets, and link them from the issues. The GitHub API cannot attach
+      files to issues.
+- [ ] **Links back to Bugzilla.** Add a link to the original bug
+      (`https://bugzilla.dvb.org/show_bug.cgi?id=N`) while `bugzilla.dvb.org`
+      is still online.
+- [ ] **Fewer requests for open issues.** Open issues are created and then
+      updated with the same content. Skipping that update would save about
+      a tenth of the requests that count against GitHub's hourly limit
+      (666 of the DVB issues are open).
+- [ ] **Original README.** It still says the beta API option is `-b`.
