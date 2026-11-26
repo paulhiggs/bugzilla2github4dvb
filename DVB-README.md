@@ -20,7 +20,8 @@ python bugzilla2github -x export.xml -o OWNER -r REPO -t TOKEN
 # Real run: creates labels, milestones and issues
 python bugzilla2github -x export.xml -o OWNER -r REPO -t TOKEN -f
 
-# Also fetch the attachment files from Bugzilla and upload them to GitHub
+# Also link back to Bugzilla, and fetch the attachment files from Bugzilla
+# to upload them to GitHub
 python bugzilla2github -x export.xml -o OWNER -r REPO -t TOKEN \
     -b https://bugzilla.dvb.org -k BUGZILLA_API_KEY -f
 ```
@@ -120,6 +121,30 @@ because `bugzilla.dvb.org` ignores the `X-BUGZILLA-API-KEY` header.
 
 Without `-b`, the issues say the attachment contents were not exported.
 
+### Links to comments
+
+Bugzilla text often refers to comments by their number within the bug, as
+in `(In reply to comment #3)`. On GitHub, `#3` would link to issue #3. Now:
+
+- `comment #N`, `comment N` and `comments N` link to that comment's
+  `## Comment` heading in the same issue;
+- `bug 123, comment 4` links to the comment in issue #123;
+- a comment number that does not exist in the bug, such as
+  `Additional Comment #1` in old pasted text, is left as text. A zero-width
+  space after the `#` stops it linking to an issue.
+
+The original text is kept as the link text. Each `## Comment` heading has an
+anchor (`<a name="comment-ID">`) for these links. In the DVB export, 683
+references become links and 72 are left as text. With the beta import API
+(`-e`) comments are separate on GitHub, so all references are left as text.
+
+### Links back to Bugzilla
+
+With `-b`, each issue links back to its bug on Bugzilla
+(`show_bug.cgi?id=N`), each comment to itself (`#cN`), and each attachment
+to its Bugzilla page (`attachment.cgi?id=N`). These links stop working when
+`bugzilla.dvb.org` goes offline.
+
 ### GitHub milestones
 
 Each Bugzilla target milestone becomes a GitHub milestone, and each issue is
@@ -188,8 +213,7 @@ DVB bugs take roughly 12–14 hours.
   issue description, and issues are dated by the GitHub run, not by Bugzilla.
   The original dates are shown in the text.
 - **Bug references.** `bug 123` in text becomes `bug #123`, which links to
-  that issue. `comment #3` in Bugzilla text also links to issue #3, not to a
-  comment.
+  that issue.
 
 ## To do
 
@@ -216,17 +240,15 @@ DVB bugs take roughly 12–14 hours.
 
 ### Improvements
 
-- [ ] **`comment #N` links.** Rewrite `comment #N` in Bugzilla text so it
-      does not link to GitHub issue #N, for example to link to the
-      `## Comment` heading in the same issue.
+- [x] **`comment #N` links.** They link to the comment's heading (see
+      [Links to comments](#links-to-comments)).
 - [x] **Attachment files.** Fetched from Bugzilla and uploaded to the
       repository (see [Attachment files](#attachment-files)). All 312 files
       of the DVB export (35 MB) fetch correctly. Attachment 88 is referenced
       by bug 1191 but is not in the export, so it is still shown as not
       available.
-- [ ] **Links back to Bugzilla.** Add a link to the original bug
-      (`https://bugzilla.dvb.org/show_bug.cgi?id=N`) while `bugzilla.dvb.org`
-      is still online.
+- [x] **Links back to Bugzilla.** Added with `-b` (see
+      [Links back to Bugzilla](#links-back-to-bugzilla)).
 - [ ] **Fewer requests for open issues.** Open issues are created and then
       updated with the same content. Skipping that update would save about
       a tenth of the requests that count against GitHub's hourly limit
