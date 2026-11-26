@@ -19,13 +19,23 @@ python bugzilla2github -x export.xml -o OWNER -r REPO -t TOKEN
 
 # Real run: creates labels, milestones and issues
 python bugzilla2github -x export.xml -o OWNER -r REPO -t TOKEN -f
+
+# Also fetch the attachment files from Bugzilla and upload them to GitHub
+python bugzilla2github -x export.xml -o OWNER -r REPO -t TOKEN \
+    -b https://bugzilla.dvb.org -k BUGZILLA_API_KEY -f
 ```
 
 Requires Python 3 and `requests`.
 
 The token needs **Issues: Read and write** on the target repository
-(fine-grained token) or the `repo` scope (classic token). The beta import API
-option is `-e`, not `-b` as the original README says.
+(fine-grained token) or the `repo` scope (classic token). To upload
+attachments it also needs **Contents: Read and write**. The beta import API
+option is `-e`, not `-b` as the original README says. In this fork `-b` gives
+the Bugzilla URL.
+
+A Bugzilla API key is made in Bugzilla under *Preferences → API Keys*.
+`-c FOLDER` sets where the fetched files are kept. The default is an
+`attachments` folder next to the XML file.
 
 A real run can be stopped and started again with the same command: issues
 already on GitHub and up to date are skipped, and the run continues from the
@@ -80,10 +90,35 @@ Now every field is kept:
   deadline, hardware, OS, time tracking, restricted groups and flags.
   Placeholder values such as `---`, `unspecified` and `Not used` are left out.
 - **Attachments.** Each attachment also shows who attached it, when, when it
-  was last modified, and whether it is a patch or obsolete. The XML export does
-  not contain the attachment files, and the issue says so.
+  was last modified, and whether it is a patch or obsolete. Each issue
+  description also has a table of all its attachments.
 
 Only Bugzilla internals (tokens, access settings, sort order) are ignored.
+
+### Attachment files
+
+The XML export only describes attachments, without the files. With `-b`
+(and `-k` when Bugzilla requires a login), the script:
+
+- fetches each file with the Bugzilla REST API
+  (`GET /rest/bug/attachment/{id}`), keeping a local copy so each file is
+  fetched only once;
+- uploads it to the GitHub repository as
+  `attachments/<bug>/<attachment id>-<Bugzilla file name>`, skipping files
+  already there and identical. Each file is one commit on the default
+  branch;
+- links the file from the comment that added it and from the attachments
+  table. Images are also shown inline.
+
+All attachments are included. Obsolete ones are struck through, marked
+**(obsolete)**, and the comment says "This attachment is obsolete".
+
+The Bugzilla file name and content type are kept. Characters not allowed in
+file names are replaced with `_`, and a file name with no extension gets one
+from its content type. The API key is sent as the `api_key` query parameter,
+because `bugzilla.dvb.org` ignores the `X-BUGZILLA-API-KEY` header.
+
+Without `-b`, the issues say the attachment contents were not exported.
 
 ### GitHub milestones
 
@@ -184,21 +219,11 @@ DVB bugs take roughly 12–14 hours.
 - [ ] **`comment #N` links.** Rewrite `comment #N` in Bugzilla text so it
       does not link to GitHub issue #N, for example to link to the
       `## Comment` heading in the same issue.
-- [ ] **Attachment files.** Include the attachments themselves in the GitHub
-      issues. The XML export only describes them: 312 attachments in the DVB
-      export. For example, bug 3419 has three Word documents (attachments
-      312, 313 and 315), and only their names and sizes reach GitHub.
-  - Fetch the files with the
-    [Bugzilla 5.2 REST API](https://bugzilla.readthedocs.io/en/5.2/api/index.html):
-    `GET /rest/bug/{bug_id}/attachment` lists a bug's attachments with their
-    contents (base64 `data`), and `GET /rest/bug/attachment/{attachment_id}`
-    fetches one. An API key may be needed for restricted bugs.
-  - The GitHub API cannot attach files to issues, so store the files in the
-    repository, for example `attachments/<bug>/<attachment id>-<filename>`,
-    or as release assets. Then link each one from the comment that added it.
-    Images could be shown inline.
-  - Keep each attachment's details: who attached it, when, and whether it is
-    obsolete or a patch.
+- [x] **Attachment files.** Fetched from Bugzilla and uploaded to the
+      repository (see [Attachment files](#attachment-files)). All 312 files
+      of the DVB export (35 MB) fetch correctly. Attachment 88 is referenced
+      by bug 1191 but is not in the export, so it is still shown as not
+      available.
 - [ ] **Links back to Bugzilla.** Add a link to the original bug
       (`https://bugzilla.dvb.org/show_bug.cgi?id=N`) while `bugzilla.dvb.org`
       is still online.
