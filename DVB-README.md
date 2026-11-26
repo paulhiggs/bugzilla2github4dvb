@@ -3,7 +3,7 @@
 [paulhiggs/bugzilla2github4dvb](https://github.com/paulhiggs/bugzilla2github4dvb)
 is a fork of
 [berestovskyy/bugzilla2github](https://github.com/berestovskyy/bugzilla2github).
-Its `forDVB` branch adapts the tool to migrate the DVB Bugzilla (`bugzilla.dvb.org`) to GitHub Issues. It is used
+Its `master` branch adapts the tool to migrate the DVB Bugzilla (`bugzilla.dvb.org`) to GitHub Issues. It is used
 with XML exports from **Bugzilla version 5.2+**: the export's root element
 reads `<bugzilla version="5.2+" ...>`. It has not been tested with exports from
 other Bugzilla versions.
